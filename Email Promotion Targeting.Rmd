@@ -1,0 +1,218 @@
+---
+title: "Email Promotion Customer Targeting "
+output: html_document
+author: Tongxin Guo
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
+```{r}
+rm(list=ls()); gc();
+# dir =  "~/UR/Analytics Design/workshop"
+# setwd(dir)
+library(dplyr)
+library(tidyr)
+library(data.table)
+library(ggplot2)
+library(grf)
+
+d = read.csv("test_data_1904.csv")
+```
+
+## Wine retailer experiment
+
+**Test setting**: email to retailer customers
+
+**Unit**: customer (email address)
+
+**Treatments**: email, holdout
+
+**Reponse**: open, click and 1-month purchase (\$)
+
+**Selection**: all active customers
+
+**Assignment**: randomly assigned (1/2 each) to email or control (ctrl)
+
+
+```{r}
+summary(d)
+```
+
+
+
+```{r}
+dt = data.table(d)
+dagg = dt[,.(open = mean(open), click=mean(click), purch = mean(purch),seOpen = sd(open)/sqrt(.N), seClick=sd(click)/sqrt(.N), sePurch = sd(purch)/sqrt(.N),.N),by = .(group)]
+dagg
+```
+
+For this case explanation, we will focus on the purchases variable.
+
+
+## a. causal effect
+```{r}
+summary(lm(purch~group,data=d)) #compares each email to control group
+```
+
+
+The precision of our estimates is sufficient here to establish the average effect, but if they didn't we could try to add covariates to absorb some of the error and reduce the standard errors. We can do this as follows here:
+
+```{r}
+summary(lm(purch~group+past_purch+last_purch+visits,data=d)) #adding baseline variables as controls
+summary(lm(purch~group+chard+sav_blanc+syrah+cab+last_purch+visits,data=d)) #adding controls
+summary(lm(purch~group+chard+sav_blanc+syrah+cab+last_purch+visits,data=d)) #adding controls separating emails
+# the standard error didn't shrink much
+```
+
+## baseline var 1:days since last purchase
+```{r}
+hist(d$last_purch,
+     xlab="Days Since Last Purchase", ylab="Customers",
+     main="Histogram of Days Since Last Purchase")
+d$recentPurch = (d$last_purch < 60)
+dt = data.table(d)
+
+```
+
+
+## Slicing and dicing: recent buyers versus aged customers
+```{r}
+dagg = dt[,.(open = mean(open), click=mean(click), purch = mean(purch),seOpen = sd(open)/sqrt(.N), seClick=sd(click)/sqrt(.N), sePurch = sd(purch)/sqrt(.N),.N),by = .(group,recentPurch)]
+dagg
+```
+
+## Is email more effective for recent buyers?
+```{r}
+dodge = position_dodge(width=1); ##to form constant dimensions
+ggplot(aes(fill=group,y=purch,x=recentPurch,ymax=purch+sePurch,ymin=purch-sePurch),data=dagg)+
+  geom_bar(position=dodge,stat="identity") +
+  geom_errorbar(position=dodge)
+  labs(x="Group",y="Purchases")
+```
+
+
+
+
+## Measuring causal effects with regression: Conditional causal effects
+```{r}
+summary(lm(purch~group*recentPurch,data=d)) #compares each email to control group
+```
+
+```{r}
+summary(lm(purch~recentPurch + group:recentPurch,data=d)) #compares each email to control group
+```
+
+## baseline var 2:past purchase
+```{r}
+d$Monetary = (d$past_purch > 50)
+summary(lm(purch~group*Monetary,data=d))
+```
+
+```{r}
+summary(lm(purch~Monetary+ group:Monetary,data=d))
+```
+
+
+## baseline var 3:website visit
+```{r}
+d$Fre_web = (d$visits > 5)
+summary(lm(purch~group*Fre_web,data=d))
+```
+
+```{r}
+summary(lm(purch~Fre_web+ group:Fre_web,data=d))
+```
+
+## baseline var 4: syrah
+```{r}
+d$anySyrah = (d$syrah > 0);
+summary(lm(purch~ anySyrah+ group:anySyrah,data=d))
+```
+
+## Cab
+```{r}
+d$anyCab = (d$cab > 0);
+summary(lm(purch~anyCab + group:anyCab,data=d))
+```
+
+##Chard
+```{r}
+d$anyChard = (d$chard > 0);
+summary(lm(purch~ group*anyChard,data=d))
+```
+
+##Sav blanc
+```{r}
+d$anysav_blanc = (d$sav_blanc> 0);
+summary(lm(purch~group*anysav_blanc,data=d))
+```
+
+##Q3 Causal forest model
+```{r}
+set.seed(1)
+cf_size <- nrow(d) #nrow(d)
+cf_set = sample(nrow(d),cf_size)
+treat <- (d$group=='email')[cf_set]
+response <- d$purch[cf_set]
+baseline <- d[cf_set, c("last_purch", "visits", "chard", "sav_blanc", "syrah", "cab")]
+tmp=proc.time()[3]
+cf <- causal_forest(baseline, response, treat)
+tmp = proc.time()[3]-tmp
+print(cf)
+
+```
+
+## Overall average treatment effect
+```{r}
+average_treatment_effect(cf, method="AIPW")
+```
+
+
+## Predicted uplift
+Just like any uplift model, we can use the model to predict the email effect for new customers.
+```{r}
+new_data <- data.frame(d$chard,d$sav_blanc,d$syrah,d$cab,d$last_purch,d$visits)
+prediction <- predict(cf, new_data, estimate.variance = TRUE)
+```
+
+## Predicted uplift for all customers in test
+```{r}
+hist(predict(cf)$predictions,
+     main="Histogram of Purchase Lift",
+     xlab="Purchase Lift for Email", ylab="Customers")
+```
+
+## Score with lift
+```{r}
+score <- prediction$predictions*0.3-0.1
+
+hist(score,
+     main="Histogram of score",
+     xlab="Score", ylab="Customers",breaks = "FD", xlim=c(-2,4))
+abline(v=0,col='red')
+
+sum(score>1.317*0.3-0.1)/length(score)
+quantile(score)
+```
+
+
+## Uplift versus past purchase amount
+```{r}
+trans_gray <- rgb(0.1, 0.1, 0.1, alpha=0.1)
+plot(d$past_purch[1:cf_size], prediction$predictions[1:cf_size],
+     cex=0.5, col=trans_gray,
+     xlab="Past Purchase Amount ($)", ylab="Predicted Treatment Effect ($)")
+```
+
+
+## Uplift versus days since last purchase
+```{r}
+trans_gray <- rgb(0.1, 0.1, 0.1, alpha=0.1)
+plot(d$last_purch[1:cf_size], predict(cf)$predictions,
+     cex=0.5, col=trans_gray,
+     xlab="Days Since Last Purchase", ylab="Predicted Treatment Effect ($)")
+```
